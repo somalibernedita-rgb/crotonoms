@@ -219,7 +219,7 @@ Analyze the above and return ONE strict JSON trading decision with this exact sc
       return this._safetyFallback("NEWS_RISK_OVERRIDE");
     }
 
-    if (marketData.spread > marketData.atr * 0.3) {
+    if (marketData.spread > marketData.atr * 0.8) {
       return this._safetyFallback("SPREAD_TOO_WIDE");
     }
 
