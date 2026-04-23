@@ -1,8 +1,8 @@
 const { logger } = require("./logger");
 
 /**
- * Autonomous Trading Engine — Bare Minimum Filter Version
- * Hanya 2 filter tersisa. AI Cerebras bebas sepenuhnya.
+ * Autonomous Trading Engine — Aggressive Entry Version
+ * 2 filter teknikal sahaja. Prompt AI dipaksa lebih berani entry.
  */
 class TradingEngine {
   constructor(cerebras) {
@@ -112,59 +112,77 @@ Output strict JSON only.`.trim();
 
   // ─── Prompt Builder ─────────────────────────────────────────────────────────
   _buildPrompt(data) {
+    const price = ((data.bid + data.ask) / 2).toFixed(3);
+    const emaDir = data.ema20 && data.ema50
+      ? (data.ema20 > data.ema50 ? "BULLISH (EMA20 > EMA50)" : "BEARISH (EMA20 < EMA50)")
+      : "N/A";
+
     return `
-MARKET DATA SNAPSHOT — XAUUSD
+You are an aggressive XAUUSD day trading AI. Your job is to find entries, not avoid them.
+
+MARKET DATA — XAUUSD
 ═══════════════════════════════════════
 Timestamp     : ${data.timestamp || new Date().toISOString()}
 Timeframe     : ${data.timeframe}
-Bid           : ${data.bid}
-Ask           : ${data.ask}
+Bid / Ask     : ${data.bid} / ${data.ask}
+Current Price : ${price}
 Spread (pts)  : ${data.spread}
 ATR(14)       : ${data.atr}
-ATR Ratio     : ${data.atr_ratio || "N/A"}
 
-PRICE STRUCTURE
-───────────────
-Current Price : ${((data.bid + data.ask) / 2).toFixed(3)}
-High (session): ${data.session_high || "N/A"}
-Low  (session): ${data.session_low || "N/A"}
-
-TECHNICAL INDICATORS
-────────────────────
+INDICATORS
+──────────
 RSI(14)       : ${data.rsi || "N/A"}
 EMA(20)       : ${data.ema20 || "N/A"}
 EMA(50)       : ${data.ema50 || "N/A"}
 EMA(200)      : ${data.ema200 || "N/A"}
+EMA Direction : ${emaDir}
 MACD          : ${data.macd || "N/A"}
 MACD Signal   : ${data.macd_signal || "N/A"}
 ADX           : ${data.adx || "N/A"}
 
-MARKET CONDITIONS
-─────────────────
-Volatility    : ${data.volatility || "N/A"}
+CONTEXT
+───────
 Session       : ${data.session || "N/A"}
+Volatility    : ${data.volatility || "N/A"}
 News Risk     : ${data.news_risk || "LOW"}
+Support       : ${data.support || "N/A"}
+Resistance    : ${data.resistance || "N/A"}
 Account Equity: ${data.account_equity || "N/A"}
 Open Trades   : ${data.open_trades || 0}
 Daily P&L     : ${data.daily_pnl || "N/A"}
 
-KEY LEVELS
-──────────
-Nearest Support   : ${data.support || "N/A"}
-Nearest Resistance: ${data.resistance || "N/A"}
-
 ═══════════════════════════════════════
-You are an autonomous XAUUSD trading AI. Analyze the data above and return a trading decision.
+DECISION RULES — FOLLOW STRICTLY:
 
-RULES:
-- Be decisive. If there is any directional signal, return BUY or SELL.
-- Only return NO-TRADE if the market is completely sideways (ADX < 15) or news_risk is HIGH/EXTREME.
-- Spread up to 500 points is normal for XAUUSD on Exness — ignore spread.
-- Set stop_loss and take_profit based on ATR and key levels.
-- Minimum risk/reward: 1.2
-- lot_size: 0.01 to 0.05 for accounts under $5000.
+1. EMA RULE (highest priority):
+   - Price > EMA20 AND EMA20 > EMA50 → MUST return BUY
+   - Price < EMA20 AND EMA20 < EMA50 → MUST return SELL
 
-Return ONLY this JSON, no explanation:
+2. RSI RULE:
+   - RSI > 55 → bias BUY
+   - RSI < 45 → bias SELL
+   - RSI 45-55 → follow EMA direction
+
+3. ADX RULE:
+   - ADX > 20 → market is trending, entry is valid
+   - ADX 15-20 → entry still valid if EMA confirms
+   - ADX < 15 → only then consider NO-TRADE
+
+4. NO-TRADE is only allowed when ALL of these are true:
+   - ADX < 15 (no trend at all)
+   - RSI between 48-52 (completely neutral)
+   - EMA20 and EMA50 are within 0.5 points of each other (flat)
+
+5. "High volatility" and "unclear structure" are NOT valid reasons for NO-TRADE.
+   Volatility = opportunity. Transitional markets still have a direction.
+
+6. MACD conflict alone is NOT a reason for NO-TRADE. Use EMA as tiebreaker.
+
+7. lot_size: 0.01 to 0.05 for equity under $5000.
+   stop_loss: place at nearest support/resistance or 1.5x ATR from entry.
+   take_profit: minimum 1.2x the stop_loss distance.
+
+Return ONLY this JSON, no explanation, no markdown:
 
 {
   "action": "BUY" | "SELL" | "NO-TRADE",
@@ -204,23 +222,22 @@ Return ONLY this JSON, no explanation:
     return this._validateDecision(decision, marketData);
   }
 
-  // ─── Decision Validator — 2 FILTER SAHAJA ───────────────────────────────────
+  // ─── Decision Validator — 2 FILTER TEKNIKAL SAHAJA ──────────────────────────
   _validateDecision(decision, marketData) {
 
-    // Filter 1: Action mesti valid — tanpa ini sistem crash
+    // Filter 1: Action mesti valid — prevent system crash
     const action = decision.action?.toUpperCase();
     if (!["BUY", "SELL", "NO-TRADE"].includes(action)) {
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Filter 2: SL/TP/Entry mesti ada kalau BUY atau SELL — tanpa ini EA tidak boleh execute
+    // Filter 2: BUY/SELL mesti ada entry, SL, TP — EA tidak boleh execute tanpa ini
     if (action !== "NO-TRADE") {
       if (!decision.stop_loss || !decision.take_profit || !decision.entry) {
         return this._safetyFallback("MISSING_TRADE_PARAMS");
       }
     }
 
-    // Teruskan keputusan AI sepenuhnya
     return {
       ...decision,
       action,
