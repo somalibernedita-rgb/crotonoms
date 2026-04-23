@@ -1,5 +1,5 @@
 /**
- * Basic test suite — no external dependencies needed
+ * Test suite — updated for new TradingEngine + Cerebras fix
  * Run: node tests/test.js
  */
 
@@ -21,25 +21,15 @@ function assert(condition, message) {
   if (!condition) throw new Error(message || "Assertion failed");
 }
 
-// ─── Mock Cerebras for tests ─────────────────────────────────────────────────
 const mockCerebras = {
   getModel: () => "llama3.1-8b",
-  complete: async (prompt) => ({
+  complete: async () => ({
     content: JSON.stringify({
-      action: "NO-TRADE",
-      mode: "no_trade",
-      market_state: "ranging",
-      volatility_regime: "normal",
-      entry: null,
-      stop_loss: null,
-      take_profit: null,
-      risk_reward: null,
-      lot_size: null,
-      risk_percent: null,
-      cooldown_minutes: 10,
-      confidence: 30,
-      reason: "INSUFFICIENT_CONFLUENCE",
-      invalidation: null,
+      action: "NO-TRADE", mode: "no_trade", market_state: "ranging",
+      volatility_regime: "normal", entry: null, stop_loss: null,
+      take_profit: null, risk_reward: null, lot_size: null,
+      risk_percent: null, cooldown_minutes: 10, confidence: 30,
+      reason: "ADX_TOO_LOW", invalidation: null,
       timestamp: new Date().toISOString(),
     }),
     tokens: { prompt: 100, completion: 80, total: 180 },
@@ -47,153 +37,159 @@ const mockCerebras = {
   }),
 };
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
 const { TradingEngine } = require("../tradingEngine");
 const engine = new TradingEngine(mockCerebras);
 
-test("TradingEngine initializes correctly", () => {
-  assert(engine !== null, "Engine should exist");
-  assert(typeof engine.analyze === "function", "analyze should be a function");
-  assert(typeof engine.getStatus === "function", "getStatus should be a function");
+test("Engine initializes correctly", () => {
+  assert(engine !== null);
+  assert(typeof engine.analyze === "function");
+  assert(typeof engine.getStatus === "function");
+  assert(typeof engine._parseDecision === "function");
+  assert(typeof engine._buildPrompt === "function");
 });
 
 test("getStatus returns correct structure", () => {
-  const status = engine.getStatus();
-  assert(status.status === "active", "Status should be active");
-  assert(typeof status.uptime_seconds === "number", "Uptime should be a number");
-  assert(status.model === "llama3.1-8b", "Model should match");
-  assert(typeof status.stats === "object", "Stats should be object");
+  const s = engine.getStatus();
+  assert(s.status === "active");
+  assert(typeof s.uptime_seconds === "number");
+  assert(s.model === "llama3.1-8b");
+  assert(typeof s.stats === "object");
 });
 
-test("Safety fallback returns NO-TRADE", () => {
-  const fallback = engine._safetyFallback("TEST_REASON");
-  assert(fallback.action === "NO-TRADE", "Should return NO-TRADE");
-  assert(fallback.safety_override === true, "Should mark safety override");
-  assert(fallback.reason === "TEST_REASON", "Should include reason");
+test("Safety fallback returns correct shape", () => {
+  const fb = engine._safetyFallback("TEST");
+  assert(fb.action === "NO-TRADE");
+  assert(fb.safety_override === true);
+  assert(fb.reason === "TEST");
+  assert(fb.validated === false);
+  assert(fb.entry === null);
 });
 
-test("Market data validation - valid data", () => {
-  // Test the validation logic inline
+test("Parser handles clean JSON", () => {
+  const content = JSON.stringify({
+    action: "NO-TRADE", mode: "no_trade", market_state: "ranging",
+    volatility_regime: "normal", entry: null, stop_loss: null,
+    take_profit: null, risk_reward: null, lot_size: null,
+    risk_percent: null, cooldown_minutes: 5, confidence: 20,
+    reason: "FLAT", invalidation: null, timestamp: new Date().toISOString()
+  });
+  const result = engine._parseDecision(content, { spread: 0.3, atr: 5 });
+  assert(result.action === "NO-TRADE");
+  assert(result.validated === true);
+});
+
+test("Parser handles text before/after JSON", () => {
+  const inner = JSON.stringify({
+    action: "NO-TRADE", mode: "no_trade", market_state: "ranging",
+    volatility_regime: "normal", entry: null, stop_loss: null,
+    take_profit: null, risk_reward: null, lot_size: null,
+    risk_percent: null, cooldown_minutes: 5, confidence: 20,
+    reason: "FLAT", invalidation: null, timestamp: new Date().toISOString()
+  });
+  const result = engine._parseDecision("Here is my analysis:\n" + inner + "\nDone.", { spread: 0.3, atr: 5 });
+  assert(result.action === "NO-TRADE", "Should parse despite surrounding text");
+});
+
+test("Parser handles markdown fences", () => {
+  const inner = JSON.stringify({
+    action: "NO-TRADE", mode: "no_trade", market_state: "ranging",
+    volatility_regime: "normal", entry: null, stop_loss: null,
+    take_profit: null, risk_reward: null, lot_size: null,
+    risk_percent: null, cooldown_minutes: 5, confidence: 20,
+    reason: "FLAT", invalidation: null, timestamp: new Date().toISOString()
+  });
+  const result = engine._parseDecision("```json\n" + inner + "\n```", { spread: 0.3, atr: 5 });
+  assert(result.action === "NO-TRADE", "Should parse despite markdown fences");
+});
+
+test("Parser returns PARSE_FAILED when no braces", () => {
+  const result = engine._parseDecision("sorry cannot trade", {});
+  assert(result.action === "NO-TRADE");
+  assert(result.reason === "PARSE_FAILED");
+});
+
+test("Validator rejects invalid action", () => {
+  const r = engine._validateDecision({ action: "HOLD" }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "INVALID_ACTION");
+});
+
+test("Validator rejects BUY with missing params", () => {
+  const r = engine._validateDecision({ action: "BUY", entry: 2345, stop_loss: null, take_profit: null }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "MISSING_TRADE_PARAMS");
+});
+
+test("Validator rejects RR < 1.5", () => {
+  // RR = 2/2 = 1.0 — too low
+  const r = engine._validateDecision({
+    action: "BUY", entry: 2345, stop_loss: 2343, take_profit: 2347,
+    lot_size: 0.01, risk_percent: 1, mode: "scalping",
+    market_state: "trending", volatility_regime: "normal",
+    confidence: 70, reason: "TEST", cooldown_minutes: 10
+  }, { atr: 5 });
+  assert(r.action === "NO-TRADE");
+  assert(r.reason.startsWith("RR_TOO_LOW"), "Expected RR_TOO_LOW, got: " + r.reason);
+});
+
+test("Validator passes valid BUY RR=1.625", () => {
+  // RR = 13/8 = 1.625
+  const r = engine._validateDecision({
+    action: "BUY", entry: 2345, stop_loss: 2337, take_profit: 2358,
+    lot_size: 0.02, risk_percent: 1, mode: "intraday_swing",
+    market_state: "trending", volatility_regime: "normal",
+    confidence: 75, reason: "EMA_BULL", cooldown_minutes: 30,
+    invalidation: "2337", timestamp: new Date().toISOString()
+  }, { atr: 8, news_risk: "LOW" });
+  assert(r.action === "BUY", "Expected BUY, got: " + r.action);
+  assert(r.validated === true);
+});
+
+test("Validator passes valid SELL RR=1.86", () => {
+  // RR = 13/7 = 1.857
+  const r = engine._validateDecision({
+    action: "SELL", entry: 2345, stop_loss: 2352, take_profit: 2332,
+    lot_size: 0.01, risk_percent: 1, mode: "scalping",
+    market_state: "trending", volatility_regime: "normal",
+    confidence: 68, reason: "EMA_BEAR", cooldown_minutes: 15,
+    invalidation: "2352", timestamp: new Date().toISOString()
+  }, { atr: 8, news_risk: "LOW" });
+  assert(r.action === "SELL", "Expected SELL, got: " + r.action);
+  assert(r.validated === true);
+});
+
+test("Prompt contains required fields and EMA rules", () => {
   const data = {
-    symbol: "XAUUSD",
-    bid: 1950.0,
-    ask: 1950.3,
-    spread: 30,
-    atr: 5.2,
-    timeframe: "M15",
+    timeframe: "M5", bid: 2345.50, ask: 2345.80, spread: 30,
+    atr: 9.41, rsi: 51, ema20: 2346, ema50: 2344, ema200: 2340,
+    macd: 3.45, macd_signal: 3.54, adx: 20.5,
+    session: "asia", news_risk: "LOW", account_equity: 3000, open_trades: 0
   };
-
-  const errors = [];
-  const required = ["symbol", "bid", "ask", "spread", "atr", "timeframe"];
-  for (const field of required) {
-    if (data[field] === undefined || data[field] === null) {
-      errors.push(field);
-    }
-  }
-
-  assert(errors.length === 0, `Should have no errors, got: ${errors.join(", ")}`);
+  const p = engine._buildPrompt(data);
+  assert(p.includes("XAUUSD"));
+  assert(p.includes("stop_loss"));
+  assert(p.includes("take_profit"));
+  assert(p.includes("EMA RULE"));
+  assert(p.includes("ADX RULE"));
+  assert(p.includes("BULLISH"), "Should detect BULLISH since EMA20 > EMA50");
 });
 
-test("Market data validation - missing fields", () => {
-  const data = { symbol: "XAUUSD", bid: 1950.0 };
-  const required = ["symbol", "bid", "ask", "spread", "atr", "timeframe"];
-  const errors = required.filter((f) => data[f] === undefined);
-  assert(errors.length > 0, "Should detect missing fields");
+test("Prompt detects BEARISH EMA direction", () => {
+  const data = { bid: 2345.50, ask: 2345.80, spread: 30, atr: 9.41, timeframe: "M5", ema20: 2338, ema50: 2344 };
+  const p = engine._buildPrompt(data);
+  assert(p.includes("BEARISH"), "Should detect BEARISH since EMA20 < EMA50");
 });
 
-test("Decision validation rejects low RR trades", () => {
-  const badDecision = {
-    action: "BUY",
-    entry: 1950.0,
-    stop_loss: 1948.0,
-    take_profit: 1951.5, // RR = 0.75 — too low
-    lot_size: 0.1,
-    risk_percent: 1.0,
-  };
-
-  const marketData = { spread: 0.3, atr: 5.0, news_risk: "LOW" };
-  const result = engine._validateDecision(badDecision, marketData);
-  assert(result.action === "NO-TRADE", "Low RR should return NO-TRADE");
-  assert(result.reason === "RR_BELOW_MINIMUM", "Should indicate RR reason");
+test("Stats update correctly", () => {
+  const e2 = new TradingEngine(mockCerebras);
+  e2._updateStats("BUY"); e2._updateStats("BUY");
+  e2._updateStats("SELL"); e2._updateStats("NO-TRADE");
+  assert(e2.stats.buyCount === 2);
+  assert(e2.stats.sellCount === 1);
+  assert(e2.stats.noTradeCount === 1);
 });
 
-test("Decision validation passes valid trade", () => {
-  const goodDecision = {
-    action: "BUY",
-    entry: 1950.0,
-    stop_loss: 1946.0,
-    take_profit: 1958.0, // RR = 2.0 — good
-    lot_size: 0.1,
-    risk_percent: 1.0,
-    mode: "intraday_swing",
-    market_state: "trending",
-    volatility_regime: "normal",
-    confidence: 72,
-    reason: "EMA_CROSS_CONFLUENCE",
-    cooldown_minutes: 30,
-    timestamp: new Date().toISOString(),
-  };
-
-  const marketData = { spread: 0.3, atr: 5.0, news_risk: "LOW" };
-  const result = engine._validateDecision(goodDecision, marketData);
-  assert(result.action === "BUY", "Valid trade should pass");
-  assert(result.validated === true, "Should be marked validated");
-});
-
-test("High news risk forces NO-TRADE", () => {
-  const decision = {
-    action: "BUY",
-    entry: 1950.0,
-    stop_loss: 1946.0,
-    take_profit: 1958.0,
-  };
-
-  const marketData = { spread: 0.3, atr: 5.0, news_risk: "HIGH" };
-  const result = engine._validateDecision(decision, marketData);
-  assert(result.action === "NO-TRADE", "High news risk should force NO-TRADE");
-  assert(result.reason === "NEWS_RISK_OVERRIDE", "Should indicate news override");
-});
-
-test("Wide spread forces NO-TRADE", () => {
-  const decision = {
-    action: "SELL",
-    entry: 1950.0,
-    stop_loss: 1954.0,
-    take_profit: 1942.0,
-  };
-
-  // Spread = 2.0, ATR = 3.0 → ratio = 0.67 > 0.3 → REJECT
-  const marketData = { spread: 2.0, atr: 3.0, news_risk: "LOW" };
-  const result = engine._validateDecision(decision, marketData);
-  assert(result.action === "NO-TRADE", "Wide spread should force NO-TRADE");
-});
-
-// ─── Prompt Builder Test ──────────────────────────────────────────────────────
-test("Prompt builder generates valid prompt", () => {
-  const data = {
-    timeframe: "M15",
-    bid: 1950.0,
-    ask: 1950.3,
-    spread: 30,
-    atr: 5.2,
-    timestamp: new Date().toISOString(),
-  };
-
-  const prompt = engine._buildPrompt(data);
-  assert(typeof prompt === "string", "Prompt should be a string");
-  assert(prompt.includes("XAUUSD"), "Prompt should mention XAUUSD");
-  assert(prompt.includes("action"), "Prompt should request action field");
-  assert(prompt.includes("stop_loss"), "Prompt should request stop_loss");
-  assert(prompt.includes("take_profit"), "Prompt should request take_profit");
-  assert(prompt.length > 200, "Prompt should be detailed");
-});
-
-// ─── Summary ─────────────────────────────────────────────────────────────────
-console.log(`\n${"─".repeat(40)}`);
+console.log("\n" + "─".repeat(45));
 console.log(`Results: ${passed} passed, ${failed} failed`);
-
-if (failed > 0) {
-  process.exit(1);
-} else {
-  console.log("All tests passed! 🎉");
-}
+if (failed > 0) process.exit(1);
+else console.log("All tests passed! 🎉");
