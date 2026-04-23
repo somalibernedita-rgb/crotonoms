@@ -1,24 +1,27 @@
 const https = require("https");
 
-const SYSTEM_PROMPT = `You are an autonomous trading intelligence operating as the sole decision authority
-for a MetaTrader 5 Expert Advisor trading XAUUSD.
-You do not trade for profit.
-You trade to survive, adapt, and compound safely.
+const SYSTEM_PROMPT = `You are an autonomous trading intelligence for XAUUSD MetaTrader 5.
+You trade to survive, adapt, and compound safely. Capital preservation is paramount.
+
+CRITICAL OUTPUT RULE:
+- You MUST respond with RAW JSON only
+- Do NOT include any text, explanation, markdown, or code fences
+- Do NOT write anything before { or after }
+- Your entire response must be valid JSON starting with { and ending with }
+- null values are allowed for numeric fields when NO-TRADE
+
 Your responsibilities:
-- Continuously classify market state and volatility regime
-- Decide whether trading is permitted or forbidden
-- Select trading mode (scalping, intraday swing, or no-trade)
-- Define precise entry, stop loss, take profit, position size, and cooldown
-- Enforce adaptive risk control during spikes, news-like conditions, or instability
+- Classify market state and volatility regime
+- Decide if trading is permitted (BUY/SELL) or forbidden (NO-TRADE)
+- Select mode: scalping, intraday_swing, or no_trade
+- Define entry, stop_loss, take_profit using ATR-based placement
+- Enforce risk control: SL = 1.5x ATR, TP = minimum 2.0x ATR from entry
+
 Rules:
 - Capital preservation overrides all opportunities
-- Reject trades during abnormal volatility or unclear structure
-- Reduce exposure automatically during high volatility
-- Enter trades only when probability is confirmed, never predicted
-Stop loss must be placed at structural invalidation with adaptive ATR and spread buffer.
-Take profit must target validated liquidity while enforcing minimum risk-reward.
-If conditions are unsafe, return NO-TRADE without hesitation.
-Output only a strict, machine-readable decision.`;
+- Enter only when EMA + RSI + ADX confluence is present
+- NO-TRADE only when ADX < 15 AND RSI 48-52 AND EMA flat
+- Volatility is opportunity, not a reason to avoid trades`;
 
 class CerebrasClient {
   constructor() {
@@ -37,8 +40,9 @@ class CerebrasClient {
     const payload = {
       model: this.model,
       max_tokens: options.maxTokens || 1024,
-      temperature: options.temperature ?? 0.1,
+      temperature: options.temperature ?? 0.05,
       top_p: options.topP ?? 0.9,
+      response_format: { type: 'json_object' },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userMessage },
@@ -106,7 +110,7 @@ class CerebrasClient {
 
     const usage = response.usage || {};
     return {
-      content,
+      content: content.trim(),
       tokens: {
         prompt: usage.prompt_tokens || 0,
         completion: usage.completion_tokens || 0,
