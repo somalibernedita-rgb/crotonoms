@@ -182,7 +182,17 @@ Analyze the above and return ONE strict JSON trading decision with this exact sc
   "reason": "<concise machine-readable reason>",
   "invalidation": "<price level that negates this decision>",
   "timestamp": "<ISO8601>"
-}`.trim();
+}
+
+CRITICAL TRADING INSTRUCTIONS:
+- Spread for XAUUSD on Exness is normally 20-300 points — this is ACCEPTABLE, do NOT reject based on spread
+- If RSI shows clear momentum AND price is above/below EMA20 — this is sufficient for a trade signal
+- ADX above 20 = trending market, suitable for BUY or SELL
+- Only return NO-TRADE if market is truly chaotic (ADX < 15 AND RSI between 45-55) or news_risk is HIGH/EXTREME
+- Minimum confidence threshold to trade: 55
+- Set stop_loss at nearest structural support/resistance level
+- Set take_profit at minimum 1.2x the stop_loss distance
+- lot_size should be 0.01 to 0.05 for small accounts under $5000`.trim();
   }
 
   // ─── Decision Parser ────────────────────────────────────────────────────────
@@ -214,12 +224,14 @@ Analyze the above and return ONE strict JSON trading decision with this exact sc
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Force NO-TRADE in dangerous conditions
+    // Force NO-TRADE only for HIGH/EXTREME news risk
     if (marketData.news_risk === "HIGH" || marketData.news_risk === "EXTREME") {
       return this._safetyFallback("NEWS_RISK_OVERRIDE");
     }
 
-    if (marketData.spread > marketData.atr * 30) {
+    // ✅ LOOSENED: was atr * 30, now atr * 100
+    // XAUUSD spread on Exness normally 20-300 pts, this is acceptable
+    if (marketData.spread > marketData.atr * 100) {
       return this._safetyFallback("SPREAD_TOO_WIDE");
     }
 
@@ -233,7 +245,8 @@ Analyze the above and return ONE strict JSON trading decision with this exact sc
         (decision.take_profit - decision.entry) / (decision.entry - decision.stop_loss)
       );
 
-      if (rr < 1.5) {
+      // ✅ LOOSENED: was 1.5, now 1.2
+      if (rr < 1.2) {
         logger.warn("RR below minimum threshold", { rr: rr.toFixed(2) });
         return this._safetyFallback("RR_BELOW_MINIMUM");
       }
