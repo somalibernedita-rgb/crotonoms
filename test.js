@@ -193,3 +193,70 @@ console.log("\n" + "─".repeat(45));
 console.log(`Results: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
 else console.log("All tests passed! 🎉");
+
+// ─── NEW: Invalid stops tests (fix for MT5 error 10016) ──────────────────────
+const { TradingEngine: TE2 } = require("../tradingEngine");
+const eng2 = new TE2(mockCerebras);
+
+test("Rejects SL == TP (MT5 error 10016)", () => {
+  const r = eng2._validateDecision({
+    action: "BUY", entry: 4736.0, stop_loss: 4728.46, take_profit: 4728.46
+  }, {});
+  assert(r.action === "NO-TRADE", "SL=TP must be rejected");
+  assert(r.reason === "SL_EQUALS_TP", "Got: " + r.reason);
+});
+
+test("Rejects SL == entry (division by zero)", () => {
+  const r = eng2._validateDecision({
+    action: "BUY", entry: 4736.0, stop_loss: 4736.0, take_profit: 4758.0
+  }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "SL_EQUALS_ENTRY", "Got: " + r.reason);
+});
+
+test("Rejects BUY with SL above entry", () => {
+  const r = eng2._validateDecision({
+    action: "BUY", entry: 4736.0, stop_loss: 4750.0, take_profit: 4758.0
+  }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "SL_WRONG_SIDE_BUY", "Got: " + r.reason);
+});
+
+test("Rejects BUY with TP below entry", () => {
+  const r = eng2._validateDecision({
+    action: "BUY", entry: 4736.0, stop_loss: 4722.0, take_profit: 4720.0
+  }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "TP_WRONG_SIDE_BUY", "Got: " + r.reason);
+});
+
+test("Rejects SELL with SL below entry", () => {
+  const r = eng2._validateDecision({
+    action: "SELL", entry: 4736.0, stop_loss: 4720.0, take_profit: 4710.0
+  }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "SL_WRONG_SIDE_SELL", "Got: " + r.reason);
+});
+
+test("Rejects SELL with TP above entry", () => {
+  const r = eng2._validateDecision({
+    action: "SELL", entry: 4736.0, stop_loss: 4750.0, take_profit: 4745.0
+  }, {});
+  assert(r.action === "NO-TRADE");
+  assert(r.reason === "TP_WRONG_SIDE_SELL", "Got: " + r.reason);
+});
+
+test("Passes valid BUY from real data (ATR=9.41)", () => {
+  // entry=4736, ATR=9.41 → SL=4736-(9.41*1.5)=4721.9, TP=4736+(9.41*2.5)=4759.5
+  const r = eng2._validateDecision({
+    action: "BUY", entry: 4736.0, stop_loss: 4721.9, take_profit: 4759.5,
+    lot_size: 0.01, risk_percent: 1, mode: "scalping",
+    market_state: "trending", volatility_regime: "normal",
+    confidence: 80, reason: "EMA20_GT_EMA50_RSI_GT_55",
+    cooldown_minutes: 10, invalidation: "4721.9",
+    timestamp: new Date().toISOString()
+  }, { atr: 9.41, news_risk: "LOW" });
+  assert(r.action === "BUY", "Expected BUY, got: " + r.action);
+  assert(r.validated === true);
+  assert(r.risk_reward >= 1.5, "RR should be >= 1.5, got: " + r.risk_reward);
+});
