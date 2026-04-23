@@ -1,8 +1,11 @@
 const { logger } = require("./logger");
 
 /**
- * Autonomous Trading Engine — Aggressive Entry Version
- * 2 filter teknikal sahaja. Prompt AI dipaksa lebih berani entry.
+ * Autonomous Trading Engine — Robust Parser + RR Filter
+ * Filter 1: Action valid
+ * Filter 2: SL/TP/Entry mesti ada
+ * Filter 3: RR >= 1.5
+ * Parser: Robust — handle AI response yang ada text sebelum/selepas JSON
  */
 class TradingEngine {
   constructor(cerebras) {
@@ -178,11 +181,16 @@ DECISION RULES — FOLLOW STRICTLY:
 
 6. MACD conflict alone is NOT a reason for NO-TRADE. Use EMA as tiebreaker.
 
-7. lot_size: 0.01 to 0.05 for equity under $5000.
-   stop_loss: place at nearest support/resistance or 1.5x ATR from entry.
-   take_profit: minimum 1.2x the stop_loss distance.
+7. IMPORTANT — SL/TP RULES:
+   - stop_loss: place at 1.5x ATR from entry
+   - take_profit: place at minimum 2.0x ATR from entry
+   - This ensures TP is always further than SL (RR >= 1.5)
+   - Never set TP closer than SL distance
 
-Return ONLY this JSON, no explanation, no markdown:
+8. lot_size: 0.01 to 0.05 for equity under $5000.
+
+CRITICAL: Return ONLY raw JSON. No explanation. No markdown. No text before or after.
+Start your response with { and end with }
 
 {
   "action": "BUY" | "SELL" | "NO-TRADE",
@@ -203,26 +211,42 @@ Return ONLY this JSON, no explanation, no markdown:
 }`.trim();
   }
 
-  // ─── Decision Parser ────────────────────────────────────────────────────────
+  // ─── Decision Parser — ROBUST VERSION ───────────────────────────────────────
   _parseDecision(content, marketData) {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn("No JSON in AI response");
+    // Step 1: Buang markdown fences
+    let clean = content.replace(/```json|```/gi, "").trim();
+
+    // Step 2: Cuba cari JSON object — ambil yang paling besar/lengkap
+    // Cari dari { pertama hingga } terakhir
+    const firstBrace = clean.indexOf("{");
+    const lastBrace = clean.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+      logger.warn("No JSON braces found in AI response", { preview: clean.substring(0, 100) });
       return this._safetyFallback("PARSE_FAILED");
     }
 
+    const jsonStr = clean.substring(firstBrace, lastBrace + 1);
+
     let decision;
     try {
-      decision = JSON.parse(jsonMatch[0]);
+      decision = JSON.parse(jsonStr);
     } catch (e) {
-      logger.warn("JSON parse error", { error: e.message });
-      return this._safetyFallback("JSON_INVALID");
+      // Step 3: Cuba repair JSON yang terpotong — tambah closing brace
+      try {
+        const repaired = jsonStr + "}";
+        decision = JSON.parse(repaired);
+        logger.warn("JSON repaired by adding closing brace");
+      } catch (e2) {
+        logger.warn("JSON parse failed even after repair", { error: e2.message, preview: jsonStr.substring(0, 150) });
+        return this._safetyFallback("JSON_INVALID");
+      }
     }
 
     return this._validateDecision(decision, marketData);
   }
 
-  // ─── Decision Validator — 2 FILTER TEKNIKAL SAHAJA ──────────────────────────
+  // ─── Decision Validator — 3 FILTER ──────────────────────────────────────────
   _validateDecision(decision, marketData) {
 
     // Filter 1: Action mesti valid — prevent system crash
@@ -231,10 +255,21 @@ Return ONLY this JSON, no explanation, no markdown:
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Filter 2: BUY/SELL mesti ada entry, SL, TP — EA tidak boleh execute tanpa ini
+    // Filter 2: BUY/SELL mesti ada entry, SL, TP
     if (action !== "NO-TRADE") {
       if (!decision.stop_loss || !decision.take_profit || !decision.entry) {
         return this._safetyFallback("MISSING_TRADE_PARAMS");
+      }
+
+      // Filter 3: RR mesti >= 1.5
+      const rr = Math.abs(
+        (decision.take_profit - decision.entry) /
+        (decision.entry - decision.stop_loss)
+      );
+
+      if (rr < 1.5) {
+        logger.warn("RR below minimum", { rr: rr.toFixed(2) });
+        return this._safetyFallback(`RR_TOO_LOW:${rr.toFixed(2)}`);
       }
     }
 
