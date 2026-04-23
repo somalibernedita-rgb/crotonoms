@@ -1,9 +1,9 @@
 const { logger } = require("./logger");
 
 /**
- * Autonomous Trading Engine
- * Wraps Cerebras AI with market context building,
- * response parsing, and safety fallback logic.
+ * Autonomous Trading Engine — Minimal Filter Version
+ * Hanya safety filter kritikal yang dipertahankan.
+ * Biarkan Cerebras AI yang buat keputusan penuh.
  */
 class TradingEngine {
   constructor(cerebras) {
@@ -28,7 +28,7 @@ class TradingEngine {
     try {
       aiResponse = await this.cerebras.complete(prompt, {
         maxTokens: 1024,
-        temperature: 0.05, // Very low for deterministic trading decisions
+        temperature: 0.05,
       });
     } catch (err) {
       this.stats.errorCount++;
@@ -129,7 +129,6 @@ PRICE STRUCTURE
 Current Price : ${((data.bid + data.ask) / 2).toFixed(3)}
 High (session): ${data.session_high || "N/A"}
 Low  (session): ${data.session_low || "N/A"}
-VWAP          : ${data.vwap || "N/A"}
 
 TECHNICAL INDICATORS
 ────────────────────
@@ -139,7 +138,6 @@ EMA(50)       : ${data.ema50 || "N/A"}
 EMA(200)      : ${data.ema200 || "N/A"}
 MACD          : ${data.macd || "N/A"}
 MACD Signal   : ${data.macd_signal || "N/A"}
-Bollinger %B  : ${data.bb_pct || "N/A"}
 ADX           : ${data.adx || "N/A"}
 
 MARKET CONDITIONS
@@ -155,16 +153,19 @@ KEY LEVELS
 ──────────
 Nearest Support   : ${data.support || "N/A"}
 Nearest Resistance: ${data.resistance || "N/A"}
-Liquidity Above   : ${data.liquidity_above || "N/A"}
-Liquidity Below   : ${data.liquidity_below || "N/A"}
-
-ORDER BOOK (if available)
-─────────────────────────
-Buy Clusters  : ${data.buy_clusters || "N/A"}
-Sell Clusters : ${data.sell_clusters || "N/A"}
 
 ═══════════════════════════════════════
-Analyze the above and return ONE strict JSON trading decision with this exact schema:
+You are an autonomous XAUUSD trading AI. Analyze the data above and return a trading decision.
+
+RULES:
+- Be decisive. If there is any directional signal, return BUY or SELL.
+- Only return NO-TRADE if the market is completely sideways (ADX < 15) or news_risk is HIGH/EXTREME.
+- Spread up to 500 points is normal for XAUUSD on Exness — ignore spread.
+- Set stop_loss and take_profit based on ATR and key levels.
+- Minimum risk/reward: 1.2
+- lot_size: 0.01 to 0.05 for accounts under $5000.
+
+Return ONLY this JSON, no explanation:
 
 {
   "action": "BUY" | "SELL" | "NO-TRADE",
@@ -179,28 +180,17 @@ Analyze the above and return ONE strict JSON trading decision with this exact sc
   "risk_percent": <number or null>,
   "cooldown_minutes": <integer>,
   "confidence": <0-100>,
-  "reason": "<concise machine-readable reason>",
-  "invalidation": "<price level that negates this decision>",
+  "reason": "<concise reason>",
+  "invalidation": "<price level>",
   "timestamp": "<ISO8601>"
-}
-
-CRITICAL TRADING INSTRUCTIONS:
-- Spread for XAUUSD on Exness is normally 20-300 points — this is ACCEPTABLE, do NOT reject based on spread
-- If RSI shows clear momentum AND price is above/below EMA20 — this is sufficient for a trade signal
-- ADX above 20 = trending market, suitable for BUY or SELL
-- Only return NO-TRADE if market is truly chaotic (ADX < 15 AND RSI between 45-55) or news_risk is HIGH/EXTREME
-- Minimum confidence threshold to trade: 55
-- Set stop_loss at nearest structural support/resistance level
-- Set take_profit at minimum 1.2x the stop_loss distance
-- lot_size should be 0.01 to 0.05 for small accounts under $5000`.trim();
+}`.trim();
   }
 
   // ─── Decision Parser ────────────────────────────────────────────────────────
   _parseDecision(content, marketData) {
-    // Extract JSON from response
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      logger.warn("No JSON found in AI response, defaulting to NO-TRADE");
+      logger.warn("No JSON in AI response");
       return this._safetyFallback("PARSE_FAILED");
     }
 
@@ -208,61 +198,41 @@ CRITICAL TRADING INSTRUCTIONS:
     try {
       decision = JSON.parse(jsonMatch[0]);
     } catch (e) {
-      logger.warn("JSON parse error in AI response", { error: e.message });
+      logger.warn("JSON parse error", { error: e.message });
       return this._safetyFallback("JSON_INVALID");
     }
 
-    // Validate and sanitize decision
     return this._validateDecision(decision, marketData);
   }
 
-  // ─── Decision Validator ─────────────────────────────────────────────────────
+  // ─── Decision Validator — HANYA 4 FILTER KRITIKAL ───────────────────────────
   _validateDecision(decision, marketData) {
-    const action = decision.action?.toUpperCase();
 
+    // Filter 1: Action mesti valid — tanpa ini sistem akan crash
+    const action = decision.action?.toUpperCase();
     if (!["BUY", "SELL", "NO-TRADE"].includes(action)) {
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Force NO-TRADE only for HIGH/EXTREME news risk
+    // Filter 2: Berita HIGH/EXTREME — terlalu berbahaya untuk trade
     if (marketData.news_risk === "HIGH" || marketData.news_risk === "EXTREME") {
       return this._safetyFallback("NEWS_RISK_OVERRIDE");
     }
 
-    // ✅ LOOSENED: was atr * 30, now atr * 100
-    // XAUUSD spread on Exness normally 20-300 pts, this is acceptable
-    if (marketData.spread > marketData.atr * 100) {
-      return this._safetyFallback("SPREAD_TOO_WIDE");
-    }
-
-    // Validate trade parameters if action is BUY or SELL
+    // Filter 3: BUY/SELL mesti ada SL dan TP — tanpa ini EA tidak boleh execute
     if (action !== "NO-TRADE") {
       if (!decision.stop_loss || !decision.take_profit || !decision.entry) {
         return this._safetyFallback("MISSING_TRADE_PARAMS");
       }
 
-      const rr = Math.abs(
-        (decision.take_profit - decision.entry) / (decision.entry - decision.stop_loss)
-      );
-
-      // ✅ LOOSENED: was 1.5, now 1.2
-      if (rr < 1.2) {
-        logger.warn("RR below minimum threshold", { rr: rr.toFixed(2) });
-        return this._safetyFallback("RR_BELOW_MINIMUM");
-      }
-
-      // Cap lot size to prevent over-leverage
+      // Filter 4: Cap lot size — jangan sampai blow account
       if (decision.lot_size > 5.0) {
         decision.lot_size = 5.0;
         logger.warn("Lot size capped at 5.0");
       }
-
-      if (decision.risk_percent > 2.0) {
-        decision.risk_percent = 2.0;
-        logger.warn("Risk percent capped at 2.0");
-      }
     }
 
+    // Semua OK — teruskan keputusan AI tanpa halangan lain
     return {
       ...decision,
       action,
@@ -294,7 +264,7 @@ CRITICAL TRADING INSTRUCTIONS:
     };
   }
 
-  // ─── Stats Tracker ──────────────────────────────────────────────────────────
+  // ─── Stats ──────────────────────────────────────────────────────────────────
   _updateStats(action) {
     if (action === "NO-TRADE") this.stats.noTradeCount++;
     else if (action === "BUY") this.stats.buyCount++;
