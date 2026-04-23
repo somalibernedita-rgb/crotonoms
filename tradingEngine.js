@@ -181,11 +181,22 @@ DECISION RULES — FOLLOW STRICTLY:
 
 6. MACD conflict alone is NOT a reason for NO-TRADE. Use EMA as tiebreaker.
 
-7. IMPORTANT — SL/TP RULES:
-   - stop_loss: place at 1.5x ATR from entry
-   - take_profit: place at minimum 2.0x ATR from entry
-   - This ensures TP is always further than SL (RR >= 1.5)
-   - Never set TP closer than SL distance
+7. IMPORTANT — SL/TP RULES (DIRECTION IS CRITICAL):
+   FOR BUY orders:
+   - stop_loss  = entry MINUS 1.5x ATR  (SL must be BELOW entry)
+   - take_profit = entry PLUS 2.5x ATR  (TP must be ABOVE entry)
+   - Example: entry=4736, ATR=9 → SL=4736-(9x1.5)=4722.5, TP=4736+(9x2.5)=4758.5
+
+   FOR SELL orders:
+   - stop_loss  = entry PLUS 1.5x ATR   (SL must be ABOVE entry)
+   - take_profit = entry MINUS 2.5x ATR (TP must be BELOW entry)
+   - Example: entry=4736, ATR=9 → SL=4736+(9x1.5)=4749.5, TP=4736-(9x2.5)=4713.5
+
+   FORBIDDEN — will be rejected by server:
+   - SL == TP (same value)
+   - SL == entry (same value)
+   - BUY with SL above entry
+   - SELL with SL below entry
 
 8. lot_size: 0.01 to 0.05 for equity under $5000.
 
@@ -255,22 +266,66 @@ Start your response with { and end with }
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Filter 2: BUY/SELL mesti ada entry, SL, TP
+    // Filter 2: BUY/SELL mesti ada entry, SL, TP — dan semua mesti angka valid > 0
     if (action !== "NO-TRADE") {
-      if (!decision.stop_loss || !decision.take_profit || !decision.entry) {
+      const e  = parseFloat(decision.entry);
+      const sl = parseFloat(decision.stop_loss);
+      const tp = parseFloat(decision.take_profit);
+
+      if (!e || !sl || !tp || isNaN(e) || isNaN(sl) || isNaN(tp)) {
         return this._safetyFallback("MISSING_TRADE_PARAMS");
       }
 
-      // Filter 3: RR mesti >= 1.5
-      const rr = Math.abs(
-        (decision.take_profit - decision.entry) /
-        (decision.entry - decision.stop_loss)
-      );
-
-      if (rr < 1.5) {
-        logger.warn("RR below minimum", { rr: rr.toFixed(2) });
-        return this._safetyFallback(`RR_TOO_LOW:${rr.toFixed(2)}`);
+      // Filter 2b: SL tidak boleh sama dengan entry (division by zero)
+      if (Math.abs(e - sl) < 0.001) {
+        logger.warn("SL equals entry", { entry: e, sl });
+        return this._safetyFallback("SL_EQUALS_ENTRY");
       }
+
+      // Filter 2c: SL tidak boleh sama dengan TP — ini penyebab MT5 error 10016
+      if (Math.abs(sl - tp) < 0.001) {
+        logger.warn("SL equals TP — MT5 invalid stops", { sl, tp });
+        return this._safetyFallback("SL_EQUALS_TP");
+      }
+
+      // Filter 2d: Arah SL dan TP mesti betul
+      // BUY  → SL di bawah entry, TP di atas entry
+      // SELL → SL di atas entry,  TP di bawah entry
+      if (action === "BUY") {
+        if (sl >= e) {
+          logger.warn("BUY: SL must be below entry", { entry: e, sl });
+          return this._safetyFallback("SL_WRONG_SIDE_BUY");
+        }
+        if (tp <= e) {
+          logger.warn("BUY: TP must be above entry", { entry: e, tp });
+          return this._safetyFallback("TP_WRONG_SIDE_BUY");
+        }
+      }
+
+      if (action === "SELL") {
+        if (sl <= e) {
+          logger.warn("SELL: SL must be above entry", { entry: e, sl });
+          return this._safetyFallback("SL_WRONG_SIDE_SELL");
+        }
+        if (tp >= e) {
+          logger.warn("SELL: TP must be below entry", { entry: e, tp });
+          return this._safetyFallback("TP_WRONG_SIDE_SELL");
+        }
+      }
+
+      // Filter 3: RR mesti >= 1.5 — sekarang aman dari division by zero
+      const rr = Math.abs((tp - e) / (e - sl));
+
+      if (!isFinite(rr) || isNaN(rr) || rr < 1.5) {
+        logger.warn("RR below minimum or invalid", { rr: isFinite(rr) ? rr.toFixed(2) : rr });
+        return this._safetyFallback(`RR_TOO_LOW:${isFinite(rr) ? rr.toFixed(2) : "invalid"}`);
+      }
+
+      // Patch nilai ke float bersih
+      decision.entry      = e;
+      decision.stop_loss  = sl;
+      decision.take_profit = tp;
+      decision.risk_reward = parseFloat(rr.toFixed(2));
     }
 
     return {
