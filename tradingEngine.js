@@ -1,9 +1,8 @@
 const { logger } = require("./logger");
 
 /**
- * Autonomous Trading Engine — Minimal Filter Version
- * Hanya safety filter kritikal yang dipertahankan.
- * Biarkan Cerebras AI yang buat keputusan penuh.
+ * Autonomous Trading Engine — Bare Minimum Filter Version
+ * Hanya 2 filter tersisa. AI Cerebras bebas sepenuhnya.
  */
 class TradingEngine {
   constructor(cerebras) {
@@ -205,34 +204,23 @@ Return ONLY this JSON, no explanation:
     return this._validateDecision(decision, marketData);
   }
 
-  // ─── Decision Validator — HANYA 4 FILTER KRITIKAL ───────────────────────────
+  // ─── Decision Validator — 2 FILTER SAHAJA ───────────────────────────────────
   _validateDecision(decision, marketData) {
 
-    // Filter 1: Action mesti valid — tanpa ini sistem akan crash
+    // Filter 1: Action mesti valid — tanpa ini sistem crash
     const action = decision.action?.toUpperCase();
     if (!["BUY", "SELL", "NO-TRADE"].includes(action)) {
       return this._safetyFallback("INVALID_ACTION");
     }
 
-    // Filter 2: Berita HIGH/EXTREME — terlalu berbahaya untuk trade
-    if (marketData.news_risk === "HIGH" || marketData.news_risk === "EXTREME") {
-      return this._safetyFallback("NEWS_RISK_OVERRIDE");
-    }
-
-    // Filter 3: BUY/SELL mesti ada SL dan TP — tanpa ini EA tidak boleh execute
+    // Filter 2: SL/TP/Entry mesti ada kalau BUY atau SELL — tanpa ini EA tidak boleh execute
     if (action !== "NO-TRADE") {
       if (!decision.stop_loss || !decision.take_profit || !decision.entry) {
         return this._safetyFallback("MISSING_TRADE_PARAMS");
       }
-
-      // Filter 4: Cap lot size — jangan sampai blow account
-      if (decision.lot_size > 5.0) {
-        decision.lot_size = 5.0;
-        logger.warn("Lot size capped at 5.0");
-      }
     }
 
-    // Semua OK — teruskan keputusan AI tanpa halangan lain
+    // Teruskan keputusan AI sepenuhnya
     return {
       ...decision,
       action,
